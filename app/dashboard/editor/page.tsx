@@ -50,6 +50,7 @@ type Section = {
 
 type Profile = {
   name: string;
+  slug: string;
   headline: string;
   eyebrow: string;
   location: string;
@@ -384,6 +385,17 @@ function uid() {
   return Math.random().toString(36).slice(2, 10);
 }
 
+// Convert a name or manually entered slug into a URL-friendly value.
+function slugify(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .trim()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
 function blankItem(id: string): Item {
   return {
     id,
@@ -417,6 +429,7 @@ function defaultConfig(): Config {
   return {
     profile: {
       name: "",
+      slug: "",
       headline: "",
       eyebrow: "Portfolio",
       location: "",
@@ -777,7 +790,25 @@ export default function PortfolioEditorPage() {
   /* ---------- State helpers ---------- */
 
   function setProfile(patch: Partial<Profile>) {
-    setConfig((c) => ({ ...c, profile: { ...c.profile, ...patch } }));
+    setConfig((c) => {
+      const updatedProfile = { ...c.profile, ...patch };
+      const nameWasChanged = Object.prototype.hasOwnProperty.call(patch, "name");
+      const slugWasChanged = Object.prototype.hasOwnProperty.call(patch, "slug");
+
+      // Keep the slug in sync with the name while it is still the generated
+      // version. If the user has customized it, preserve their chosen slug.
+      if (nameWasChanged && !slugWasChanged) {
+        const currentGeneratedSlug = slugify(c.profile.name);
+        const slugIsEmpty = !c.profile.slug.trim();
+        const slugStillMatchesName = c.profile.slug === currentGeneratedSlug;
+
+        if (slugIsEmpty || slugStillMatchesName) {
+          updatedProfile.slug = slugify(patch.name ?? "");
+        }
+      }
+
+      return { ...c, profile: updatedProfile };
+    });
   }
 
   function setDesign(patch: Partial<Design>) {
@@ -1743,6 +1774,13 @@ ${html}
           onChange={(event) =>
             setProfile({ [field.key]: event.target.value } as Partial<Profile>)
           }
+          onBlur={() => {
+            // Normalize the slug after typing, not on every keystroke,
+            // so the input cursor does not jump while the user is editing.
+            if (field.key === "slug") {
+              setProfile({ slug: slugify(profile.slug) });
+            }
+          }}
           className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-3"
         />
       </Field>
@@ -2446,6 +2484,7 @@ ${html}
                   placeholder: "Open to internships",
                 },
                 { key: "email", label: "Contact email" },
+                { key: "slug", label: "Portfolio URL", placeholder: "your-name" },
               ])}
 
               <h3 className="mt-6 font-semibold text-gray-900">
