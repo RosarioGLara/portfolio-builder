@@ -19,9 +19,15 @@ const transporter =
       })
     : null;
 
+
 export const auth = betterAuth({
   baseURL: process.env.BETTER_AUTH_URL,
   secret: process.env.BETTER_AUTH_SECRET,
+  trustedOrigins: [
+    "http://localhost:3000",
+    process.env.BETTER_AUTH_URL!,
+  ],
+
 
   database: prismaAdapter(prisma, {
     provider: "postgresql",
