@@ -728,7 +728,9 @@ export default function PortfolioEditorPage() {
   >("idle");
   const [previewMode, setPreviewMode] = useState<PreviewMode>("desktop");
   const [newSectionType, setNewSectionType] = useState<SectionType>("text");
-
+  const [portfolioId, setPortfolioId] = useState<string | null>(null);
+  const [saveEnabled, setSaveEnabled] = useState(false);
+  const [portfolioSlug, setPortfolioSlug] = useState("");
   // Hidden desktop render used to build the downloadable HTML file.
   const exportRef = useRef<HTMLDivElement>(null);
 
@@ -736,56 +738,233 @@ export default function PortfolioEditorPage() {
 
   /* ---------- Load and autosave (browser localStorage) ---------- */
 
+
+  /* ---------- Load and autosave ---------- */
+
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw) as Partial<Config>;
-        const defaults = defaultConfig();
-        setConfig({
-          profile: { ...defaults.profile, ...saved.profile },
-          design: { ...defaults.design, ...saved.design },
-          image: { ...defaults.image, ...saved.image },
-          sections: Array.isArray(saved.sections)
-            ? saved.sections.map(normalizeSection)
-            : defaults.sections,
-        });
+    let cancelled = false;
+
+    async function loadPortfolio() {
+      const params = new URLSearchParams(window.location.search);
+      const requestedId = params.get("id");
+      const isNew = params.get("new") === "1";
+      const defaults = defaultConfig();
+
+      // Start with a clean configuration when creating a new portfolio.
+      if (isNew) {
+        setPortfolioId(null);
+        setPortfolioSlug("");
+        setConfig(defaults);
+        setSaveEnabled(true);
+        return;
       }
-    } catch {
-      // Ignore unreadable saved data and start fresh.
+
+      try {
+        const response = await fetch("/api/portfolios", {
+          cache: "no-store",
+        });
+
+        if (!response.ok) {
+          throw new Error("Could not load portfolios.");
+        }
+
+        const data = await response.json();
+        const portfolios = data.portfolios ?? [];
+
+        // Load the portfolio selected from the dashboard.
+        // Otherwise, resume the most recently updated portfolio.
+        const portfolio = requestedId
+          ? portfolios.find(
+              (item: { id: string }) => item.id === requestedId
+            )
+          : portfolios[0];
+
+        if (requestedId && !portfolio) {
+          throw new Error(
+            "That portfolio could not be found in your account."
+          );
+        }
+
+        if (cancelled) return;
+
+        if (portfolio) {
+          const saved = portfolio.config as Partial<Config>;
+
+          // The database slug is the canonical URL.
+          setPortfolioId(portfolio.id);
+          setPortfolioSlug(portfolio.slug);
+
+          setConfig({
+            profile: {
+              ...defaults.profile,
+              ...saved.profile,
+              slug: portfolio.slug,
+            },
+            design: {
+              ...defaults.design,
+              ...saved.design,
+            },
+            image: {
+              ...defaults.image,
+              ...saved.image,
+            },
+            sections: Array.isArray(saved.sections)
+              ? saved.sections.map(normalizeSection)
+              : defaults.sections,
+          });
+
+          setSaveEnabled(true);
+          return;
+        }
+
+        // Recover a local draft if no database portfolio exists.
+        const raw = localStorage.getItem(STORAGE_KEY);
+
+        let recoveredConfig: Config;
+
+        if (raw) {
+          const saved = JSON.parse(raw) as Partial<Config>;
+
+          recoveredConfig = {
+            profile: {
+              ...defaults.profile,
+              ...saved.profile,
+            },
+            design: {
+              ...defaults.design,
+              ...saved.design,
+            },
+            image: {
+              ...defaults.image,
+              ...saved.image,
+            },
+            sections: Array.isArray(saved.sections)
+              ? saved.sections.map(normalizeSection)
+              : defaults.sections,
+          };
+        } else {
+          recoveredConfig = defaults;
+        }
+
+        setPortfolioId(null);
+        setPortfolioSlug(recoveredConfig.profile.slug || "");
+        setConfig(recoveredConfig);
+        setSaveEnabled(true);
+      } catch (error) {
+        if (cancelled) return;
+
+        console.error("Failed to load portfolio:", error);
+        setSaveStatus("failed");
+
+        // Keep autosave disabled after a failed load.
+      }
     }
-    setLoaded(true);
+
+    loadPortfolio().finally(() => {
+      if (!cancelled) {
+        setLoaded(true);
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
-    if (!loaded) return;
-    const timer = setTimeout(() => {
+    if (!loaded || !saveEnabled) return;
+
+    const timer = setTimeout(async () => {
+      // Keep a browser backup.
       try {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(config));
-        setSaveStatus("saved");
       } catch {
-        try {
-          // Most likely the uploaded images are too big for browser storage.
-          const withoutImages: Config = {
-            ...config,
-            image: { ...config.image, src: "" },
-            sections: config.sections.map((s) => ({
-              ...s,
-              items: s.items.map((it) => ({
-                ...it,
-                image: it.image.startsWith("data:") ? "" : it.image,
-              })),
-            })),
-          };
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(withoutImages));
-          setSaveStatus("noimage");
-        } catch {
-          setSaveStatus("failed");
+        // The database save can still proceed.
+      }
+
+      try {
+        const isNewPortfolio = !portfolioId;
+
+        // Normalize the chosen URL before saving it.
+        // If no URL was entered, preserve the current slug or
+        // generate a fallback slug for a new portfolio.
+        const slugToSave =
+          slugify(config.profile.slug) ||
+          portfolioSlug ||
+          (isNewPortfolio
+            ? `portfolio-${crypto.randomUUID().slice(0, 8)}`
+            : "");
+
+        if (!slugToSave) {
+          throw new Error("Please enter a valid portfolio URL.");
         }
+
+        const configToSave: Config = {
+          ...config,
+          profile: {
+            ...config.profile,
+            slug: slugToSave,
+          },
+        };
+
+        const response = await fetch("/api/portfolios", {
+          method: isNewPortfolio ? "POST" : "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(
+            isNewPortfolio
+              ? {
+                  slug: slugToSave,
+                  config: configToSave,
+                }
+              : {
+                  id: portfolioId,
+                  slug: slugToSave,
+                  config: configToSave,
+                }
+          ),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.error || "Portfolio save failed.");
+        }
+
+        const savedSlug = data.portfolio?.slug ?? slugToSave;
+
+        if (isNewPortfolio) {
+          setPortfolioId(data.portfolio.id);
+
+          // Fill in the generated slug only if the user left
+          // the URL field empty while the request was running.
+          setConfig((current) => {
+            if (current.profile.slug.trim()) {
+              return current;
+            }
+
+            return {
+              ...current,
+              profile: {
+                ...current.profile,
+                slug: savedSlug,
+              },
+            };
+          });
+        }
+
+        setPortfolioSlug(savedSlug);
+        setSaveStatus("saved");
+      } catch (error) {
+        console.error("Portfolio autosave failed:", error);
+        setSaveStatus("failed");
       }
     }, 600);
+
     return () => clearTimeout(timer);
-  }, [config, loaded]);
+  }, [config, loaded, portfolioId, portfolioSlug, saveEnabled]);
+
 
   /* ---------- State helpers ---------- */
 
@@ -1763,8 +1942,13 @@ ${html}
 
   /* ---------- Editor pieces ---------- */
 
+
   function renderProfileFields(
-    list: { key: ProfileTextKey; label: string; placeholder?: string }[]
+    list: {
+      key: ProfileTextKey;
+      label: string;
+      placeholder?: string;
+    }[]
   ) {
     return list.map((field) => (
       <Field key={field.key} label={field.label}>
@@ -1772,20 +1956,32 @@ ${html}
           value={profile[field.key]}
           placeholder={field.placeholder}
           onChange={(event) =>
-            setProfile({ [field.key]: event.target.value } as Partial<Profile>)
+            setProfile({
+              [field.key]: event.target.value,
+            } as Partial<Profile>)
           }
           onBlur={() => {
-            // Normalize the slug after typing, not on every keystroke,
-            // so the input cursor does not jump while the user is editing.
             if (field.key === "slug") {
-              setProfile({ slug: slugify(profile.slug) });
+              setProfile({
+                slug: slugify(profile.slug),
+              });
             }
           }}
           className="mt-1 w-full rounded-lg border border-gray-300 px-3 py-3"
         />
+
+        {field.key === "slug" && (
+          <p className="mt-2 text-sm text-gray-500">
+            Your portfolio URL:{" "}
+            <span className="font-medium text-gray-800">
+              /p/{slugify(profile.slug) || "your-name"}
+            </span>
+          </p>
+        )}
       </Field>
     ));
   }
+
 
   function renderSectionEditor(s: Section, index: number) {
     const fields = itemFields[s.type];
